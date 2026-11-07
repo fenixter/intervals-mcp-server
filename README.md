@@ -255,6 +255,7 @@ Once the server is running and Claude Desktop is configured, you can use the fol
 - `get_activity_streams`: Get raw data streams (power, heart rate, etc.) for a specific activity
 - `get_athlete_power_curves`: Get best power output curves for selected durations and time periods
 - `get_wellness_data`: Fetch wellness data
+- `add_nutrition`: Add kcal/carbs/protein/fat to a day's wellness totals (negative values for corrections) and append a note to the wellness comments
 - `get_events`: Retrieve upcoming events (workouts, races, etc.)
 - `get_event_by_id`: Get detailed information for a specific event
 - `add_or_update_event`: Create or update an event (workout, race, note, etc.)
