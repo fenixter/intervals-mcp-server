@@ -47,6 +47,41 @@ def validate_date(date_str: str) -> str:
         raise ValueError("Invalid date format. Please use YYYY-MM-DD.") from exc
 
 
+_LOCAL_DATETIME_FORMATS = ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
+
+
+def parse_local_datetime(value: str) -> tuple[str, bool]:
+    """Parse a date or a local date-time into the ``start_date_local`` format.
+
+    Accepts ``YYYY-MM-DD``, ``YYYY-MM-DDTHH:MM`` and ``YYYY-MM-DDTHH:MM:SS``
+    (a space instead of ``T`` is accepted too). The value is the athlete's
+    local wall-clock time, so a timezone suffix (``Z`` or ``+02:00``) is rejected.
+
+    Args:
+        value: The date or date-time string.
+
+    Returns:
+        Tuple of (``YYYY-MM-DDTHH:MM:SS`` string, whether a time was given).
+
+    Raises:
+        ValueError: If the value matches none of the accepted formats.
+    """
+    value = value.strip()
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%dT00:00:00"), False
+    except ValueError:
+        pass
+    for fmt in _LOCAL_DATETIME_FORMATS:
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%dT%H:%M:%S"), True
+        except ValueError:
+            continue
+    raise ValueError(
+        "Invalid date format. Please use YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS] "
+        "(athlete's local time, without timezone)."
+    )
+
+
 def resolve_athlete_id(
     athlete_id: str | None, default_athlete_id: str = ""
 ) -> tuple[str, str | None]:

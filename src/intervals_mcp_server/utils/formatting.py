@@ -30,17 +30,42 @@ class _KeyTracker(dict):
         return super().__contains__(key)
 
 
-def format_activity_summary(activity: dict[str, Any]) -> str:
-    """Format an activity into a readable string."""
-    start_time = activity.get("startTime", activity.get("start_date", "Unknown"))
+def _format_activity_start(activity: dict[str, Any]) -> str:
+    """Return the activity start time with an explicit timezone marker.
 
+    Prefers ``start_date_local`` (athlete's local wall-clock time, labelled with
+    the activity's ``timezone`` when known); otherwise falls back to the UTC
+    ``start_date``/``startTime`` and labels it ``UTC``.
+    """
+    local = activity.get("start_date_local")
+    if isinstance(local, str) and local:
+        try:
+            text = datetime.fromisoformat(local.replace("Z", "")).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            text = local
+        tz_name = activity.get("timezone")
+        return f"{text} (local time{', ' + tz_name if tz_name else ''})"
+
+    start_time = activity.get("startTime", activity.get("start_date", "Unknown"))
     if isinstance(start_time, str) and len(start_time) > 10:
-        # Format datetime if it's a full ISO string
         try:
             dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-            start_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+            return dt.strftime("%Y-%m-%d %H:%M:%S") + " UTC"
         except ValueError:
             pass
+    return str(start_time)
+
+
+def _format_work_kj(joules: Any) -> str:
+    """Convert the API's ``icu_joules`` (joules) into kilojoules."""
+    if isinstance(joules, (int, float)) and not isinstance(joules, bool):
+        return f"{joules / 1000:.1f} kJ"
+    return "N/A"
+
+
+def format_activity_summary(activity: dict[str, Any]) -> str:
+    """Format an activity into a readable string."""
+    start_time = _format_activity_start(activity)
 
     rpe = activity.get("perceived_exertion", None)
     if rpe is None:
@@ -89,7 +114,7 @@ Average Power: {activity.get("avgPower", activity.get("icu_average_watts", activ
 Weighted Avg Power: {activity.get("icu_weighted_avg_watts", "N/A")} watts
 Training Load: {activity.get("trainingLoad", activity.get("icu_training_load", "N/A"))}
 FTP: {activity.get("icu_ftp", "N/A")} watts
-Kilojoules: {activity.get("icu_joules", "N/A")}
+Work: {_format_work_kj(activity.get("icu_joules"))}
 Intensity: {activity.get("icu_intensity", "N/A")}
 Power:HR Ratio: {activity.get("icu_power_hr", "N/A")}
 Variability Index: {activity.get("icu_variability_index", "N/A")}
@@ -402,32 +427,111 @@ def format_wellness_entry(entries: dict[str, Any], include_all_fields: bool = Fa
     return "\n".join(lines)
 
 
-def format_event_summary(event: dict[str, Any]) -> str:
-    """Format a basic event summary into a readable string."""
+def _format_hms(secs: Any) -> str:
+    """Format seconds as H:MM:SS (or the raw value when it is not numeric)."""
+    if not isinstance(secs, (int, float)) or isinstance(secs, bool):
+        return str(secs)
+    total = int(secs)
+    return f"{total // 3600}:{(total % 3600) // 60:02d}:{total % 60:02d}"
 
-    # Update to check for "date" if "start_date_local" is not provided
-    event_date = event.get("start_date_local", event.get("date", "Unknown"))
-    event_type = "Workout" if event.get("workout") else "Race" if event.get("race") else "Other"
-    event_name = event.get("name", "Unnamed")
-    event_id = event.get("id", "N/A")
-    event_desc = event.get("description", "No description")
 
-    return f"""Date: {event_date}
-ID: {event_id}
-Type: {event_type}
-Name: {event_name}
-Description: {event_desc}"""
+def _event_date(event: dict[str, Any]) -> str:
+    return str(event.get("start_date_local") or event.get("date") or "Unknown")
+
+
+def _event_type(event: dict[str, Any]) -> str:
+    """Real sport type of the event, with a legacy fallback for payloads without it."""
+    if event.get("type"):
+        return str(event["type"])
+    return "Workout" if event.get("workout") else "Race" if event.get("race") else "Other"
+
+
+def _event_metric_lines(event: dict[str, Any]) -> list[str]:
+    """Planned duration/distance/load and weekly-target values, only when present."""
+    lines = []
+    if event.get("moving_time") is not None:
+        lines.append(
+            f"Moving Time: {event['moving_time']} seconds ({_format_hms(event['moving_time'])})"
+        )
+    if event.get("distance") is not None:
+        lines.append(f"Distance: {event['distance']} meters")
+    if event.get("icu_training_load") is not None:
+        lines.append(f"Planned Load: {event['icu_training_load']}")
+    if event.get("icu_intensity") is not None:
+        lines.append(f"Planned Intensity: {event['icu_intensity']}")
+    if event.get("load_target") is not None:
+        lines.append(f"Load Target: {event['load_target']}")
+    if event.get("time_target") is not None:
+        lines.append(
+            f"Time Target: {event['time_target']} seconds ({_format_hms(event['time_target'])})"
+        )
+    if event.get("distance_target") is not None:
+        lines.append(f"Distance Target: {event['distance_target']} meters")
+    return lines
+
+
+def format_event_summary(event: dict[str, Any], include_description: bool = True) -> str:
+    """Format an event (planned workout, race, note, weekly target...) into a readable string.
+
+    Args:
+        event: Event payload from the Intervals.icu API.
+        include_description: Whether to append the (possibly long) description.
+    """
+    lines = [
+        f"Date: {_event_date(event)}",
+        f"ID: {event.get('id', 'N/A')}",
+    ]
+    if event.get("category"):
+        lines.append(f"Category: {event['category']}")
+    lines.append(f"Type: {_event_type(event)}")
+    lines.append(f"Name: {event.get('name') or 'Unnamed'}")
+    lines.extend(_event_metric_lines(event))
+    if include_description:
+        lines.append(f"Description: {event.get('description') or 'No description'}")
+    return "\n".join(lines)
+
+
+def format_event_compact(event: dict[str, Any]) -> str:
+    """Format an event as a single line without description or workout steps."""
+    date = _event_date(event)
+    if date.endswith("T00:00:00"):
+        date = date[:10]
+    elif "T" in date:
+        date = date.replace("T", " ")[:16]
+    parts = [
+        date,
+        str(event.get("category") or "-"),
+        _event_type(event),
+        str(event.get("name") or "Unnamed"),
+    ]
+    if event.get("moving_time"):
+        parts.append(_format_hms(event["moving_time"]))
+    if event.get("icu_training_load") is not None:
+        parts.append(f"load {event['icu_training_load']}")
+    if event.get("load_target") is not None:
+        parts.append(f"load target {event['load_target']}")
+    if event.get("time_target") is not None:
+        parts.append(f"time target {_format_hms(event['time_target'])}")
+    if event.get("distance_target") is not None:
+        parts.append(f"distance target {event['distance_target']} m")
+    parts.append(f"id {event.get('id', 'N/A')}")
+    return " | ".join(parts)
 
 
 def format_event_details(event: dict[str, Any]) -> str:
     """Format detailed event information into a readable string."""
 
-    event_details = f"""Event Details:
-
-ID: {event.get("id", "N/A")}
-Date: {event.get("date", "Unknown")}
-Name: {event.get("name", "Unnamed")}
-Description: {event.get("description", "No description")}"""
+    event_details = "Event Details:\n\n" + "\n".join(
+        [
+            f"ID: {event.get('id', 'N/A')}",
+            f"Date: {_event_date(event)}",
+            *([f"Category: {event['category']}"] if event.get("category") else []),
+            f"Type: {_event_type(event)}",
+            f"Name: {event.get('name') or 'Unnamed'}",
+            *_event_metric_lines(event),
+            f"Description: {event.get('description') or 'No description'}",
+        ]
+    )
 
     # Check if it's a workout-based event
     if "workout" in event and event["workout"]:

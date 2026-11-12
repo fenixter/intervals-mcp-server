@@ -13,9 +13,13 @@ from intervals_mcp_server.tools.activities import (  # noqa: F401
     get_activity_details,
     get_activity_intervals,
     get_activity_streams,
+    update_activity,
+    delete_activity,
 )
 from intervals_mcp_server.tools.events import (  # noqa: F401
+    add_events_bulk,
     add_or_update_event,
+    add_or_update_note,
     delete_event,
     delete_events_by_date_range,
     get_event_by_id,
@@ -30,6 +34,10 @@ from intervals_mcp_server.tools.custom_items import (  # noqa: F401
 )
 from intervals_mcp_server.tools.power_curves import (  # noqa: F401
     get_athlete_power_curves,
+)
+from intervals_mcp_server.tools.athlete import (  # noqa: F401
+    get_athlete_settings,
+    update_sport_settings,
 )
 from intervals_mcp_server.tools.gear import get_gear_list  # noqa: F401
 from intervals_mcp_server.tools.wellness import add_nutrition, get_wellness_data  # noqa: F401
@@ -62,6 +70,12 @@ __all__ = [
     "delete_event",
     "delete_events_by_date_range",
     "add_or_update_event",
+    "add_or_update_note",
+    "add_events_bulk",
+    "update_activity",
+    "delete_activity",
+    "get_athlete_settings",
+    "update_sport_settings",
     "get_custom_items",
     "get_custom_item_by_id",
     "create_custom_item",

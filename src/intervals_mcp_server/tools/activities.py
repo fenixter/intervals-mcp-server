@@ -392,3 +392,64 @@ async def add_activity_message(
     if msg_id is not None:
         return f"Successfully added message (ID: {msg_id}) to activity {activity_id}."
     return f"Message appears to have been added to activity {activity_id}, but no ID was returned. Please verify manually."
+
+
+@mcp.tool()
+async def update_activity(
+    activity_id: str,
+    name: str | None = None,
+    description: str | None = None,
+    race: bool | None = None,
+    api_key: str | None = None,
+) -> str:
+    """Update the name, description and/or race flag of a completed activity on Intervals.icu.
+
+    Only the fields you pass are changed. Activities imported from Strava cannot be
+    updated through the API.
+
+    Args:
+        activity_id: The Intervals.icu activity ID (e.g. "i123456")
+        name: New activity name (optional)
+        description: New activity description (optional; pass "" to clear it)
+        race: True to mark the activity as a race, False to unmark it (optional)
+        api_key: The Intervals.icu API key (optional, will use API_KEY from .env if not provided)
+    """
+    changes: dict[str, Any] = {
+        key: value
+        for key, value in {"name": name, "description": description, "race": race}.items()
+        if value is not None
+    }
+    if not changes:
+        return "Error: Provide at least one of name, description, race."
+
+    result = await make_intervals_request(
+        url=f"/activity/{activity_id}", api_key=api_key, method="PUT", data=changes
+    )
+    if isinstance(result, dict) and "error" in result:
+        return f"Error updating activity: {result.get('message', 'Unknown error')}"
+
+    updated = result if isinstance(result, dict) else {}
+    lines = [f"Successfully updated activity {activity_id}."]
+    for key in changes:
+        lines.append(f"  {key}: {updated.get(key, changes[key])}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def delete_activity(activity_id: str, api_key: str | None = None) -> str:
+    """Permanently delete a completed activity from Intervals.icu (e.g. a duplicate upload).
+
+    This cannot be undone. Confirm the exact activity ID with the user first.
+
+    Args:
+        activity_id: The Intervals.icu activity ID (e.g. "i123456")
+        api_key: The Intervals.icu API key (optional, will use API_KEY from .env if not provided)
+    """
+    if not activity_id:
+        return "Error: No activity ID provided."
+    result = await make_intervals_request(
+        url=f"/activity/{activity_id}", api_key=api_key, method="DELETE"
+    )
+    if isinstance(result, dict) and "error" in result:
+        return f"Error deleting activity: {result.get('message', 'Unknown error')}"
+    return f"Successfully deleted activity {activity_id}."

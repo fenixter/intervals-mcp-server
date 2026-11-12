@@ -30,6 +30,13 @@ Usage:
         - get_events
         - get_event_by_id
         - add_or_update_event
+        - add_or_update_note
+        - add_events_bulk
+        - update_activity
+        - delete_activity
+        - get_athlete_settings
+        - update_sport_settings
+        - get_gear_list
         - delete_event
         - delete_events_by_date_range
         - get_wellness_data
@@ -78,14 +85,19 @@ from intervals_mcp_server.tools.activities import (  # pylint: disable=wrong-imp
     get_activity_intervals,
     get_activity_messages,
     get_activity_streams,
+    update_activity,
+    delete_activity,
 )
 from intervals_mcp_server.tools.events import (  # pylint: disable=wrong-import-position  # noqa: E402
+    add_events_bulk,
     add_or_update_event,
+    add_or_update_note,
     delete_event,
     delete_events_by_date_range,
     get_event_by_id,
     get_events,
 )
+from intervals_mcp_server.tools.athlete import get_athlete_settings, update_sport_settings  # pylint: disable=wrong-import-position  # noqa: E402
 from intervals_mcp_server.tools.gear import get_gear_list  # pylint: disable=wrong-import-position  # noqa: E402
 from intervals_mcp_server.tools.wellness import add_nutrition, get_wellness_data  # pylint: disable=wrong-import-position  # noqa: E402
 from intervals_mcp_server.tools.power_curves import get_athlete_power_curves  # pylint: disable=wrong-import-position  # noqa: E402
@@ -113,6 +125,13 @@ __all__ = [
     "delete_event",
     "delete_events_by_date_range",
     "add_or_update_event",
+    "add_or_update_note",
+    "add_events_bulk",
+    "update_activity",
+    "delete_activity",
+    "get_athlete_settings",
+    "update_sport_settings",
+    "get_gear_list",
     "get_wellness_data",
     "add_nutrition",
     "get_athlete_power_curves",

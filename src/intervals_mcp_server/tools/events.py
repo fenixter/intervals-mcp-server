@@ -5,15 +5,27 @@ This module contains tools for retrieving, creating, updating, and deleting athl
 """
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+
+from pydantic import TypeAdapter
 
 from intervals_mcp_server.api.client import make_intervals_request
 from intervals_mcp_server.config import get_config
 from intervals_mcp_server.utils.dates import get_default_end_date, get_default_future_end_date
-from intervals_mcp_server.utils.formatting import format_event_details, format_event_summary
+from intervals_mcp_server.utils.formatting import (
+    format_event_compact,
+    format_event_details,
+    format_event_summary,
+)
 from intervals_mcp_server.utils.types import WorkoutDoc
-from intervals_mcp_server.utils.validation import resolve_activity_type, resolve_athlete_id, validate_date
+from intervals_mcp_server.utils.validation import (
+    parse_local_datetime,
+    resolve_activity_type,
+    resolve_athlete_id,
+    validate_date,
+)
 
 # Import mcp instance from shared module for tool registration
 from intervals_mcp_server.mcp_instance import mcp  # noqa: F401
@@ -21,28 +33,144 @@ from intervals_mcp_server.mcp_instance import mcp  # noqa: F401
 config = get_config()
 
 
+EVENT_CATEGORIES: tuple[str, ...] = (
+    "WORKOUT",
+    "RACE_A",
+    "RACE_B",
+    "RACE_C",
+    "NOTE",
+    "PLAN",
+    "HOLIDAY",
+    "SICK",
+    "INJURED",
+    "SET_EFTP",
+    "FITNESS_DAYS",
+    "SEASON_START",
+    "TARGET",
+    "SET_FITNESS",
+)
+"""Event categories accepted by the Intervals.icu API (EventEx.category enum)."""
+
+# Writable event fields carried over from the stored event when updating, so that
+# a partial update (e.g. only a new start_date) keeps everything else intact.
+_MERGE_FIELDS: tuple[str, ...] = (
+    "start_date_local",
+    "category",
+    "name",
+    "type",
+    "description",
+    "moving_time",
+    "distance",
+    "load_target",
+    "time_target",
+    "distance_target",
+    "indoor",
+    "color",
+)
+
+
+@dataclass
+class EventSpec:  # pylint: disable=too-many-instance-attributes
+    """One calendar event for add_events_bulk (same meaning as add_or_update_event args)."""
+
+    name: str
+    start_date: str
+    workout_type: str | None = None
+    category: str | None = None
+    workout_doc: WorkoutDoc | None = None
+    moving_time: int | None = None
+    distance: int | None = None
+    load_target: int | None = None
+    time_target: int | None = None
+    distance_target: float | None = None
+
+
+def _normalize_category(category: str | None) -> str | None:
+    """Upper-case and validate an event category (None stays None)."""
+    if category is None:
+        return None
+    normalized = category.strip().upper()
+    if normalized not in EVENT_CATEGORIES:
+        raise ValueError(
+            f"Invalid category '{category}'. Allowed: {', '.join(EVENT_CATEGORIES)}."
+        )
+    return normalized
+
+
 def _prepare_event_data(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    name: str,
-    workout_type: str,
+    name: str | None,
+    workout_type: str | None,
     start_date: str,
     workout_doc: WorkoutDoc | None,
     moving_time: int | None,
     distance: int | None,
+    category: str | None = None,
+    load_target: int | None = None,
+    time_target: int | None = None,
+    distance_target: float | None = None,
 ) -> dict[str, Any]:
-    """Prepare event data dictionary for API request.
+    """Prepare the payload for creating an event.
 
+    ``start_date`` may be a date or a local date-time (see parse_local_datetime).
     Many arguments are required to match the Intervals.icu API event structure.
     """
-    resolved_workout_type = resolve_activity_type(name, workout_type)
-    return {
-        "start_date_local": start_date + "T00:00:00",
-        "category": "WORKOUT",
+    start_date_local, _ = parse_local_datetime(start_date)
+    resolved_category = _normalize_category(category) or "WORKOUT"
+    if not name and resolved_category != "TARGET":
+        raise ValueError("name is required when creating an event.")
+    data: dict[str, Any] = {
+        "start_date_local": start_date_local,
+        "category": resolved_category,
         "name": name,
         "description": str(workout_doc) if workout_doc else None,
-        "type": resolved_workout_type,
+        "type": resolve_activity_type(name, workout_type),
         "moving_time": moving_time,
         "distance": distance,
+        "load_target": load_target,
+        "time_target": time_target,
+        "distance_target": distance_target,
     }
+    return {key: value for key, value in data.items() if value is not None}
+
+
+def _merge_event_update(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    existing: dict[str, Any],
+    name: str | None,
+    workout_type: str | None,
+    start_date: str | None,
+    workout_doc: WorkoutDoc | None,
+    moving_time: int | None,
+    distance: int | None,
+    category: str | None = None,
+    load_target: int | None = None,
+    time_target: int | None = None,
+    distance_target: float | None = None,
+) -> dict[str, Any]:
+    """Merge only the provided fields onto the stored event.
+
+    A date-only ``start_date`` keeps the stored time of day, so moving a workout
+    to another day does not reset its start time.
+    """
+    data = {key: existing[key] for key in _MERGE_FIELDS if existing.get(key) is not None}
+    if start_date:
+        start_date_local, has_time = parse_local_datetime(start_date)
+        old = str(existing.get("start_date_local") or "")
+        if not has_time and len(old) >= 19:
+            start_date_local = start_date_local[:10] + old[10:19]
+        data["start_date_local"] = start_date_local
+    updates: dict[str, Any] = {
+        "name": name,
+        "type": workout_type,
+        "category": _normalize_category(category),
+        "description": str(workout_doc) if workout_doc else None,
+        "moving_time": moving_time,
+        "distance": distance,
+        "load_target": load_target,
+        "time_target": time_target,
+        "distance_target": distance_target,
+    }
+    data.update({key: value for key, value in updates.items() if value is not None})
+    return data
 
 
 def _handle_event_response(
@@ -58,7 +186,9 @@ def _handle_event_response(
     if not result:
         return f"No events {action} for athlete {athlete_id}."
     if isinstance(result, dict):
-        return f"Successfully {action} event id: {result.get('id')}"
+        return f"Successfully {action} event id: {result.get('id')}\n" + format_event_summary(
+            result, include_description=False
+        )
     return f"Event {action} successfully at {start_date}"
 
 
@@ -93,14 +223,28 @@ async def get_events(
     api_key: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    compact: bool = False,
+    include_description: bool = True,
+    category: str | None = None,
 ) -> str:
-    """Get events for an athlete from Intervals.icu
+    """Get calendar events (planned workouts, races, notes, weekly targets...) from Intervals.icu
+
+    Each event shows its date/start time (athlete's local time), ID, category, sport type,
+    name, planned moving time, distance and load (icu_training_load), and for weekly
+    targets (category TARGET) the load_target / time_target / distance_target.
 
     Args:
         athlete_id: The Intervals.icu athlete ID (optional, will use ATHLETE_ID from .env if not provided)
         api_key: The Intervals.icu API key (optional, will use API_KEY from .env if not provided)
         start_date: Start date in YYYY-MM-DD format (optional, defaults to today)
         end_date: End date in YYYY-MM-DD format (optional, defaults to 30 days from today)
+        compact: If True, return one line per event ("date time | category | type | name |
+            duration | load | targets | id") without descriptions or workout steps.
+            Use this for long date ranges (several weeks or months). Defaults to False.
+        include_description: If False, omit event descriptions/workout steps in the full
+            format. Ignored when compact=True. Defaults to True.
+        category: Optional category filter, e.g. "WORKOUT", "RACE_A", "TARGET", or a
+            comma-separated list such as "RACE_A,RACE_B,RACE_C".
     """
     # Resolve athlete ID
     athlete_id_to_use, error_msg = resolve_athlete_id(athlete_id, config.athlete_id)
@@ -115,6 +259,13 @@ async def get_events(
 
     # Call the Intervals.icu API
     params = {"oldest": start_date, "newest": end_date}
+    if category:
+        try:
+            params["category"] = ",".join(
+                str(_normalize_category(c)) for c in category.split(",") if c.strip()
+            )
+        except ValueError as e:
+            return f"Error: {e}"
 
     result = await make_intervals_request(
         url=f"/athlete/{athlete_id_to_use}/events", api_key=api_key, params=params
@@ -134,12 +285,15 @@ async def get_events(
     if not events:
         return f"No events found for athlete {athlete_id_to_use} in the specified date range."
 
-    events_summary = "Events:\n\n"
-    for event in events:
-        if not isinstance(event, dict):
-            continue
+    event_dicts = [event for event in events if isinstance(event, dict)]
+    if compact:
+        return f"Events ({len(event_dicts)}):\n" + "\n".join(
+            format_event_compact(event) for event in event_dicts
+        )
 
-        events_summary += format_event_summary(event) + "\n\n"
+    events_summary = "Events:\n\n"
+    for event in event_dicts:
+        events_summary += format_event_summary(event, include_description) + "\n\n"
 
     return events_summary
 
@@ -164,7 +318,7 @@ async def get_event_by_id(
 
     # Call the Intervals.icu API
     result = await make_intervals_request(
-        url=f"/athlete/{athlete_id_to_use}/event/{event_id}", api_key=api_key
+        url=f"/athlete/{athlete_id_to_use}/events/{event_id}", api_key=api_key
     )
 
     if isinstance(result, dict) and "error" in result:
@@ -261,9 +415,9 @@ async def delete_events_by_date_range(
 
 
 @mcp.tool()
-async def add_or_update_event(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    workout_type: str,
-    name: str,
+async def add_or_update_event(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    workout_type: str | None = None,
+    name: str | None = None,
     athlete_id: str | None = None,
     api_key: str | None = None,
     event_id: str | None = None,
@@ -271,24 +425,54 @@ async def add_or_update_event(  # pylint: disable=too-many-arguments,too-many-po
     workout_doc: WorkoutDoc | None = None,
     moving_time: int | None = None,
     distance: int | None = None,
+    category: str | None = None,
+    load_target: int | None = None,
+    time_target: int | None = None,
+    distance_target: float | None = None,
 ) -> str:
-    """Post event for an athlete to Intervals.icu this follows the event api from intervals.icu
-    If event_id is provided, the event will be updated instead of created.
+    """Create or update a calendar event (planned workout, race, weekly target...) on Intervals.icu.
+
+    Create (no event_id): name is required (except for category TARGET); workout_type
+    defaults to a type guessed from the name (fallback Ride) and category to WORKOUT.
+    Update (event_id given): the stored event is read first and ONLY the arguments you pass
+    are changed; name, workout_type, category, steps etc. are kept. E.g. to move a workout
+    pass just event_id and start_date.
 
     Many arguments are required as this MCP tool function maps directly to the Intervals.icu API parameters.
 
     Args:
         athlete_id: The Intervals.icu athlete ID (optional, will use ATHLETE_ID from .env if not provided)
         api_key: The Intervals.icu API key (optional, will use API_KEY from .env if not provided)
-        event_id: The Intervals.icu event ID (optional, will use event_id from .env if not provided)
-        start_date: Start date in YYYY-MM-DD format (optional, defaults to today)
-        name: Name of the activity
+        event_id: The Intervals.icu event ID to update (optional; omit to create a new event)
+        start_date: Date "YYYY-MM-DD" or local date-time "YYYY-MM-DDTHH:MM[:SS]" in the
+            athlete's local time (no timezone suffix). Optional, defaults to today when creating.
+            A date without time creates the event at 00:00 (no specific time); when updating,
+            a date without time keeps the event's existing time of day.
+        name: Name of the event (required when creating, optional when updating)
         workout_doc: steps as a list of Step objects (optional, but necessary to define workout steps)
-        workout_type: Workout type (e.g. Ride, Run, Swim, Walk, Row)
+        workout_type: Sport type, e.g. Ride, VirtualRide, Run, Swim, Walk, Row (optional)
         moving_time: Total expected moving time of the workout in seconds (optional)
         distance: Total expected distance of the workout in meters (optional)
+        category: Event category (optional, defaults to WORKOUT on create). One of:
+            WORKOUT, RACE_A, RACE_B, RACE_C (race priorities), NOTE, PLAN, HOLIDAY, SICK,
+            INJURED, SET_EFTP, FITNESS_DAYS, SEASON_START, TARGET (weekly target), SET_FITNESS.
+        load_target: Training load target, for category TARGET (optional)
+        time_target: Moving time target in seconds, for category TARGET (optional)
+        distance_target: Distance target in meters, for category TARGET (optional)
 
-    Example:
+    Example - B race at 20:00 local time:
+        {"name": "Club TT", "category": "RACE_B", "start_date": "2026-12-30T20:00:00",
+         "workout_type": "VirtualRide",
+         "workout_doc": {"steps": [{"freeride": true, "duration": 1800}]}}
+
+    Example - move an existing event to another day/time (everything else kept):
+        {"event_id": "12345", "start_date": "2026-12-31T19:30:00"}
+
+    Example - weekly target (put it on the Monday of the week):
+        {"category": "TARGET", "start_date": "2026-12-28", "workout_type": "Ride",
+         "name": "Weekly", "load_target": 450, "time_target": 36000}
+
+    Example workout_doc:
         "workout_doc": {
             "description": "High-intensity workout for increasing VO2 max",
             "steps": [
@@ -341,19 +525,93 @@ async def add_or_update_event(  # pylint: disable=too-many-arguments,too-many-po
     if error_msg:
         return error_msg
 
-    if not start_date:
-        start_date = datetime.now().strftime("%Y-%m-%d")
-
     try:
-        validated_date = validate_date(start_date)
-        event_data = _prepare_event_data(
-            name, workout_type, validated_date, workout_doc, moving_time, distance
-        )
+        if event_id:
+            existing = await make_intervals_request(
+                url=f"/athlete/{athlete_id_to_use}/events/{event_id}", api_key=api_key
+            )
+            if isinstance(existing, dict) and "error" in existing:
+                return f"Error reading event {event_id} before update: {existing.get('message')}"
+            if not isinstance(existing, dict) or not existing:
+                return f"Error: event {event_id} not found."
+            event_data = _merge_event_update(
+                existing, name, workout_type, start_date, workout_doc, moving_time, distance,
+                category, load_target, time_target, distance_target,
+            )
+        else:
+            event_data = _prepare_event_data(
+                name, workout_type, start_date or datetime.now().strftime("%Y-%m-%d"),
+                workout_doc, moving_time, distance,
+                category, load_target, time_target, distance_target,
+            )
         return await _create_or_update_event_request(
-            athlete_id_to_use, api_key, event_data, validated_date, event_id
+            athlete_id_to_use, api_key, event_data, event_data.get("start_date_local", ""), event_id
         )
     except ValueError as e:
         return f"Error: {e}"
+
+
+@mcp.tool()
+async def add_events_bulk(
+    events: list[EventSpec],
+    athlete_id: str | None = None,
+    api_key: str | None = None,
+) -> str:
+    """Create many calendar events in one call (Intervals.icu bulk endpoint).
+
+    Use this to put a multi-week plan on the calendar instead of calling
+    add_or_update_event dozens of times. Every item takes the same fields and formats
+    as add_or_update_event when creating: name, start_date ("YYYY-MM-DD" or local
+    "YYYY-MM-DDTHH:MM[:SS]"), workout_type, category (default WORKOUT), workout_doc,
+    moving_time, distance, load_target, time_target, distance_target.
+    All items are validated before anything is sent; nothing is created if one is invalid.
+
+    Args:
+        events: List of events to create.
+        athlete_id: The Intervals.icu athlete ID (optional, will use ATHLETE_ID from .env if not provided)
+        api_key: The Intervals.icu API key (optional, will use API_KEY from .env if not provided)
+
+    Example:
+        {"events": [
+            {"name": "Endurance", "start_date": "2026-12-01T18:00", "workout_type": "VirtualRide",
+             "workout_doc": {"steps": [{"duration": 3600, "power": {"value": 65, "units": "%ftp"}}]}},
+            {"name": "Weekly", "category": "TARGET", "start_date": "2026-11-30",
+             "workout_type": "Ride", "load_target": 450}
+        ]}
+    """
+    athlete_id_to_use, error_msg = resolve_athlete_id(athlete_id, config.athlete_id)
+    if error_msg:
+        return error_msg
+    if not events:
+        return "Error: No events provided."
+
+    adapter = TypeAdapter(EventSpec)
+    payload: list[dict[str, Any]] = []
+    for index, item in enumerate(events, 1):
+        try:
+            spec = item if isinstance(item, EventSpec) else adapter.validate_python(item)
+            payload.append(
+                _prepare_event_data(
+                    spec.name, spec.workout_type, spec.start_date, spec.workout_doc,
+                    spec.moving_time, spec.distance, spec.category,
+                    spec.load_target, spec.time_target, spec.distance_target,
+                )
+            )
+        except ValueError as e:  # pydantic.ValidationError is a ValueError
+            return f"Error in event #{index}: {e}"
+
+    result = await make_intervals_request(
+        url=f"/athlete/{athlete_id_to_use}/events/bulk",
+        api_key=api_key,
+        method="POST",
+        data=payload,
+    )
+    if isinstance(result, dict) and "error" in result:
+        return f"Error creating events: {result.get('message', 'Unknown error')}"
+    created = [e for e in result if isinstance(e, dict)] if isinstance(result, list) else []
+    lines = [f"Created {len(created)} of {len(payload)} events:"]
+    lines.extend(format_event_compact(event) for event in created)
+    return "\n".join(lines)
 
 
 @mcp.tool()
